@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-# Configuración de Chrome optimizada
+# Configuración de Chrome para GitHub Actions
 chrome_options = Options()
 chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
@@ -21,7 +21,7 @@ def run_scraper():
     password = os.getenv("PQRD_PASS")
     
     driver = webdriver.Chrome(options=chrome_options)
-    wait = WebDriverWait(driver, 45) # Mayor tolerancia para carga de datos
+    wait = WebDriverWait(driver, 45)
 
     try:
         # --- PASO 1: Login ---
@@ -43,21 +43,63 @@ def run_scraper():
         return false;
         """
         driver.execute_script(boton_js)
-        time.sleep(10) # Espera post-login
+        time.sleep(10)
 
         # --- PASO 2: Preparación de Excel ---
         file_path = "Reclamos.xlsx"
         df = pd.read_excel(file_path, engine='openpyxl')
 
-        # Asegurar que la columna DG (índice 110) exista
+        # Asegurar columna DG (índice 110)
         while df.shape[1] <= 110:
-            df[f"Columna_Aux_{df.shape[1]}"] = ""
+            df[f"Columna_Extra_{df.shape[1]}"] = ""
         
-        target_col = 110 # Columna DG
+        target_col = 110
 
         # --- PASO 3: Bucle de Extracción ---
         for index, row in df.iterrows():
             pqr_nurc = str(row.iloc[5]).strip()
             
+            # Verificación de celda vacía para detener el bucle
             if not pqr_nurc or pqr_nurc == 'nan' or pqr_nurc == '':
-                print(f"Fin de registros detectado en fila
+                print(f"Fin de registros detectado en fila {index + 1}")
+                break
+                
+            url_reclamo = f"https://pqrdsuperargo.supersalud.gov.co/gestion/supervisar/{pqr_nurc}"
+            print(f"Procesando NURC: {pqr_nurc}")
+            driver.get(url_reclamo)
+            
+            try:
+                # Esperar que el contenedor exista
+                wait.until(EC.presence_of_element_located((By.ID, "main_table_wrapper")))
+                
+                # Scroll y espera de renderizado
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(4) 
+
+                # Esperar hasta que la tabla tenga texto real (> 50 caracteres)
+                wait.until(lambda d: len(d.find_element(By.ID, "main_table_wrapper").text.strip()) > 50)
+                
+                seguimiento_data = driver.find_element(By.ID, "main_table_wrapper").text
+                df.iat[index, target_col] = seguimiento_data
+                print(f"-> EXITO: {pqr_nurc}")
+                
+            except Exception:
+                print(f"-> AVISO: No se capturó contenido para {pqr_nurc}")
+                driver.save_screenshot(f"debug_{pqr_nurc}.png")
+                df.iat[index, target_col] = "Sin informacion o error de carga asincrona"
+            
+            time.sleep(2)
+
+        # Guardar archivo final
+        df.to_excel("Reclamos_scraping.xlsx", index=False, engine='openpyxl')
+        print("Proceso finalizado con exito.")
+
+    except Exception as e:
+        print(f"Error fatal: {e}")
+        driver.save_screenshot("error_critico.png")
+        raise
+    finally:
+        driver.quit()
+
+if __name__ == "__main__":
+    run_scraper()
