@@ -2,7 +2,6 @@ import os
 import pandas as pd
 import time
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -15,81 +14,94 @@ chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--window-size=1920,1080")
-# User-Agent para evitar ser detectado como bot básico
 chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 def run_scraper():
-    # Cargar credenciales desde Secrets
+    # Cargar credenciales desde Secrets de GitHub
     user = os.getenv("PQRD_USER")
     password = os.getenv("PQRD_PASS")
     
     driver = webdriver.Chrome(options=chrome_options)
-    wait = WebDriverWait(driver, 30) # Aumentamos el tiempo de espera a 30s
+    wait = WebDriverWait(driver, 30)
 
     try:
-        print("Iniciando sesión en SuperArgo...")
+        # --- PASO 1: Login ---
+        print("Abriendo página de login...")
         driver.get("https://pqrdsuperargo.supersalud.gov.co/login")
         
-        # PASO 1: Login
-        user_input = wait.until(EC.presence_of_element_located((By.ID, "user")))
-        user_input.send_keys(user)
+        # Ingresar credenciales
+        print("Ingresando credenciales...")
+        wait.until(EC.presence_of_element_located((By.ID, "user"))).send_keys(user)
         driver.find_element(By.ID, "password").send_keys(password)
+
+        # CLICK MEDIANTE JAVASCRIPT (Solución para el error de Timeout)
+        print("Intentando click en INGRESAR vía JS...")
+        time.sleep(2) # Pausa técnica para renderizado
         
-        # Intento de click robusto en el botón INGRESAR
-        try:
-            # Buscamos el botón por su texto interno para mayor seguridad
-            btn_ingresar = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[.//span[contains(text(), 'INGRESAR')]]")))
-            driver.execute_script("arguments[0].click();", btn_ingresar)
-            print("Click en INGRESAR exitoso.")
-        except Exception as e:
-            print(f"Error al hacer click en el botón: {e}")
-            driver.save_screenshot("error_login.png") # Captura de pantalla para depurar
-            raise
+        boton_js = """
+        var botones = document.querySelectorAll('button');
+        for (var i = 0; i < botones.length; i++) {
+            if (botones[i].textContent.includes('INGRESAR')) {
+                botones[i].click();
+                return true;
+            }
+        }
+        return false;
+        """
+        success = driver.execute_script(boton_js)
+        
+        if not success:
+            print("No se encontró el botón vía JS, intentando click tradicional...")
+            driver.find_element(By.CSS_SELECTOR, "button").click()
 
-        # Esperar a que cargue la página interna (validamos que el login fue exitoso)
-        time.sleep(7)
+        # Esperar a que el sistema procese el ingreso
+        print("Esperando carga del dashboard...")
+        time.sleep(10)
 
-        # PASO 2: Lectura de Excel
+        # --- PASO 2: Lectura de Excel ---
         file_path = "Reclamos.xlsx"
         if not os.path.exists(file_path):
-            print(f"Error: El archivo {file_path} no se encuentra en la raíz.")
+            print(f"ERROR: No se encontró el archivo {file_path}")
             return
 
         df = pd.read_excel(file_path, engine='openpyxl')
 
-        # Procesamiento por filas
+        # Iterar sobre las filas (Columna F = índice 5)
         for index, row in df.iterrows():
-            # Columna F es índice 5 (pqr_nurc)
             pqr_nurc = str(row.iloc[5]).strip()
             
-            # Detener si encuentra celda vacía
             if not pqr_nurc or pqr_nurc == 'nan' or pqr_nurc == '':
-                print(f"Fin de datos en la fila {index + 2}.")
+                print(f"Llegamos al final de los datos en la fila {index + 1}")
                 break
                 
             url_reclamo = f"https://pqrdsuperargo.supersalud.gov.co/gestion/supervisar/{pqr_nurc}"
-            print(f"Procesando: {url_reclamo}")
+            print(f"Extrayendo NURC {pqr_nurc}...")
             
             driver.get(url_reclamo)
             
             try:
-                # PASO 2.3: Extraer Seguimiento (Selector ID solicitado)
+                # PASO 2.3: Extraer Seguimiento (ID: main_table_wrapper)
                 seguimiento_elem = wait.until(EC.visibility_of_element_located((By.ID, "main_table_wrapper")))
                 
                 # PASO 3: Guardar en columna DG (índice 110)
                 df.iat[index, 110] = seguimiento_elem.text
                 
             except TimeoutException:
-                print(f"Tiempo excedido esperando seguimiento de NURC: {pqr_nurc}")
-                df.iat[index, 110] = "ERROR: No cargó la tabla"
+                print(f"Aviso: Timeout en NURC {pqr_nurc}. Saltando...")
+                df.iat[index, 110] = "No se pudo extraer información"
             
-            # Delay para evitar sobrecarga (2 segundos)
-            time.sleep(2)
+            # Respetar tiempo del servidor
+            time.sleep(3)
 
-        # PASO 3.2: Guardar archivo final
-        df.to_excel("Reclamos_scraping.xlsx", index=False, engine='openpyxl')
-        print("Archivo Reclamos_scraping.xlsx generado con éxito.")
+        # Guardar archivo final
+        output_file = "Reclamos_scraping.xlsx"
+        df.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"Proceso finalizado. Archivo {output_file} creado.")
 
+    except Exception as e:
+        print(f"Ocurrió un error inesperado: {e}")
+        driver.save_screenshot("debug_error.png") # Captura para ver qué falló
+        raise
     finally:
         driver.quit()
 
