@@ -27,13 +27,22 @@ def run_scraper():
         print("Iniciando sesión en SuperArgo...")
         driver.get("https://pqrdsuperargo.supersalud.gov.co/login")
         
+        # Esperar a que los campos de login estén presentes
         wait.until(EC.presence_of_element_located((By.ID, "user"))).send_keys(user)
         driver.find_element(By.ID, "password").send_keys(password)
-        driver.execute_script("document.querySelector('button.mat-flat-button').click();")
-        time.sleep(10)
+
+        # Esperar a que el botón de ingresar sea visible antes del click JS
+        # Usamos el selector de clase que vimos en la foto 1
+        btn_selector = "button.mat-flat-button"
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, btn_selector)))
+        
+        print("Enviando formulario...")
+        driver.execute_script(f"document.querySelector('{btn_selector}').click();")
+        time.sleep(12) # Tiempo de espera para carga del dashboard
 
         # --- PASO 2: Lectura de Excel ---
         file_path = "Reclamos.xlsx"
+        # Mantenemos dtype=str para evitar redondeos
         df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
 
         # Asegurar columna DG (índice 110)
@@ -44,6 +53,7 @@ def run_scraper():
 
         # --- PASO 3: Bucle de Extracción ---
         for index, row in df.iterrows():
+            # Limpieza de NURC para asegurar que sea el ID correcto
             pqr_nurc = str(row.iloc[5]).strip().split('.')[0]
             
             if not pqr_nurc or pqr_nurc == 'nan' or pqr_nurc == '':
@@ -54,43 +64,36 @@ def run_scraper():
             driver.get(url_reclamo)
             
             try:
-                # SELECTOR PROFUNDO PROPORCIONADO
-                selector_css = "#contenido > div > div:nth-child(1) > div > mat-card:nth-child(3) > app-follow > mat-card-content"
+                # SELECTOR PROFUNDO PROPORCIONADO POR EL USUARIO
+                selector_profundo = "#contenido > div > div:nth-child(1) > div > mat-card:nth-child(3) > app-follow > mat-card-content"
                 
-                # Esperar a que el contenedor esté presente
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector_css)))
+                # Esperamos a que el selector esté en el DOM y sea visible
+                wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, selector_profundo)))
                 
-                # Pausa para renderizado de Angular (importante para que el texto aparezca)
-                time.sleep(8)
+                # Pausa extra para renderizado dinámico de contenido (Angular)
+                time.sleep(10)
                 
-                # Intentamos extraer el texto directamente
-                elemento = driver.find_element(By.CSS_SELECTOR, selector_css)
-                texto_extraido = elemento.text.strip()
+                # Extracción forzada mediante JavaScript para capturar texto oculto/dinámico
+                script_extrayente = f"return document.querySelector('{selector_profundo}').innerText;"
+                texto_extraido = driver.execute_script(script_extrayente)
 
-                # Si el texto directo falla, buscamos tablas o divs internos (capas más profundas)
-                if len(texto_extraido) < 5:
-                    print(f"Buscando capas más profundas para {pqr_nurc}...")
-                    # Buscamos cualquier tabla o contenido de texto dentro del mat-card-content
-                    inner_content = driver.execute_script(f"return document.querySelector('{selector_css}').innerText;")
-                    texto_extraido = inner_content.strip() if inner_content else ""
-
-                df.iat[index, target_col] = texto_extraido
-                
-                if len(texto_extraido) > 10:
-                    print(f"-> ÉXITO: {pqr_nurc} ({len(texto_extraido)} caracteres extraídos)")
+                if texto_extraido:
+                    df.iat[index, target_col] = texto_extraido.strip()
+                    print(f"-> EXITO: {pqr_nurc} ({len(texto_extraido)} caracteres)")
                 else:
-                    print(f"-> AVISO: {pqr_nurc} extraído pero parece vacío.")
+                    print(f"-> AVISO: {pqr_nurc} el selector existe pero no tiene texto interno.")
+                    df.iat[index, target_col] = "Contenedor encontrado vacío"
 
             except Exception as e:
-                print(f"-> ERROR en NURC {pqr_nurc}: {e}")
+                print(f"-> ERROR en NURC {pqr_nurc}: El selector no apareció a tiempo.")
                 driver.save_screenshot(f"debug_{pqr_nurc}.png")
-                df.iat[index, target_col] = "Error de localización de elemento"
+                df.iat[index, target_col] = "Error: Selector no localizado"
             
-            time.sleep(2)
+            time.sleep(3)
 
-        # Guardar resultados
+        # Guardar archivo final
         df.to_excel("Reclamos_scraping.xlsx", index=False, engine='openpyxl')
-        print("Archivo Reclamos_scraping.xlsx generado.")
+        print("Proceso finalizado. Archivo Reclamos_scraping.xlsx generado.")
 
     finally:
         driver.quit()
