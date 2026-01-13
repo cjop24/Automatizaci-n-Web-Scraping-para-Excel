@@ -7,6 +7,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# Configuración de Chrome optimizada
 chrome_options = Options()
 chrome_options.add_argument("--headless")
 chrome_options.add_argument("--no-sandbox")
@@ -17,70 +18,86 @@ chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64
 def run_scraper():
     user = os.getenv("PQRD_USER")
     password = os.getenv("PQRD_PASS")
+    
     driver = webdriver.Chrome(options=chrome_options)
     wait = WebDriverWait(driver, 45)
 
     try:
+        # --- PASO 1: Login Robusto ---
         print("Iniciando sesión en SuperArgo...")
         driver.get("https://pqrdsuperargo.supersalud.gov.co/login")
         
-        # Ingreso de credenciales
         wait.until(EC.presence_of_element_located((By.ID, "user"))).send_keys(user)
         driver.find_element(By.ID, "password").send_keys(password)
 
-        # Login Robusto: Intentar click por texto si el selector de clase falla
+        # Intentar click en el botón de ingresar
         try:
-            btn_xpath = "//button[contains(., 'INGRESAR')]"
-            wait.until(EC.element_to_be_clickable((By.XPATH, btn_xpath))).click()
-            print("Click exitoso.")
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'INGRESAR')]"))).click()
         except:
-            print("Fallo click normal, intentando via Script...")
             driver.execute_script("document.querySelectorAll('button').forEach(b => { if(b.innerText.includes('INGRESAR')) b.click(); });")
         
-        time.sleep(12)
+        time.sleep(10)
 
-        # Cargar Excel
+        # --- PASO 2: Lectura de Excel ---
         file_path = "Reclamos.xlsx"
         df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
 
+        # Columna DG (índice 110)
         while df.shape[1] <= 110:
-            df[f"Col_Extra_{df.shape[1]}"] = ""
+            df[f"Seguimiento_Extraido_{df.shape[1]}"] = ""
         
         target_col = 110
 
+        # --- PASO 3: Bucle de Extracción ---
         for index, row in df.iterrows():
             pqr_nurc = str(row.iloc[5]).strip().split('.')[0]
             if not pqr_nurc or pqr_nurc == 'nan': break
                 
-            print(f"Abriendo NURC: {pqr_nurc}")
+            print(f"Procesando NURC: {pqr_nurc}")
             driver.get(f"https://pqrdsuperargo.supersalud.gov.co/gestion/supervisar/{pqr_nurc}")
             
             try:
-                # El selector profundo que proporcionaste
-                selector = "#contenido > div > div:nth-child(1) > div > mat-card:nth-child(3) > app-follow > mat-card-content"
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                time.sleep(10)
+                # ESPERA POR LA TABLA ESPECÍFICA (identificada en tu HTML)
+                wait.until(EC.presence_of_element_located((By.ID, "main_table")))
+                time.sleep(8) # Tiempo para que Angular cargue las filas (ng-star-inserted)
+
+                # SCRIPT DE EXTRACCIÓN PERSONALIZADO PARA TU ESTRUCTURA
+                # Extraemos la fecha, el comentario y la descripción de cada fila
+                script_extraccion = """
+                let filas = document.querySelectorAll('#main_table tbody tr.ng-star-inserted');
+                let resultado = "";
+                filas.forEach((fila) => {
+                    let cols = fila.querySelectorAll('td');
+                    if(cols.length >= 4) {
+                        let fecha = cols[0].innerText.trim();
+                        let comentario = cols[2].innerText.trim();
+                        let descripcion = cols[3].innerText.trim();
+                        resultado += `[${fecha}] ${comentario}: ${descripcion}\\n---\\n`;
+                    }
+                });
+                return resultado;
+                """
                 
-                # Extraer texto usando InnerText para asegurar captura de datos dinámicos
-                texto = driver.execute_script(f"return document.querySelector('{selector}').innerText;")
-                df.iat[index, target_col] = texto.strip() if texto else "Contenedor vacío"
-                print(f"-> Capturado: {pqr_nurc}")
-                
-            except Exception:
-                print(f"-> No se encontró contenido para {pqr_nurc}")
-                df.iat[index, target_col] = "Sin seguimiento"
-                driver.save_screenshot(f"error_nurc_{pqr_nurc}.png")
+                texto_final = driver.execute_script(script_extraccion)
+
+                if texto_final and len(texto_final) > 10:
+                    df.iat[index, target_col] = texto_final.strip()
+                    print(f"-> EXITO: {len(texto_final)} caracteres capturados.")
+                else:
+                    # Si no hay filas, puede que diga "No hay datos"
+                    df.iat[index, target_col] = "Sin registros de seguimiento en la tabla."
+                    print("-> AVISO: Tabla vacía.")
+
+            except Exception as e:
+                print(f"-> ERROR en {pqr_nurc}: No se encontró la tabla de seguimiento.")
+                driver.save_screenshot(f"debug_{pqr_nurc}.png")
+                df.iat[index, target_col] = "Error: No se localizó la tabla de seguimiento."
             
             time.sleep(2)
 
         df.to_excel("Reclamos_scraping.xlsx", index=False)
+        print("Proceso finalizado con éxito.")
 
-    except Exception as e:
-        print(f"Error fatal: {e}")
-        driver.save_screenshot("debug_error.png")
-        # Creamos un archivo vacío para que GitHub Actions no falle al buscar artifacts
-        with open("Reclamos_scraping.xlsx", "w") as f: f.write("error")
-        raise
     finally:
         driver.quit()
 
