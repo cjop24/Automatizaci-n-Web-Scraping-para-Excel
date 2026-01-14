@@ -20,58 +20,68 @@ def run_scraper():
     password = os.getenv("PQRD_PASS")
     
     driver = webdriver.Chrome(options=chrome_options)
-    wait = WebDriverWait(driver, 30)
+    wait = WebDriverWait(driver, 40)
 
     try:
         # --- LOGIN ---
-        print("Iniciando sesión...")
+        print("Iniciando sesión en SuperArgo...")
         driver.get("https://pqrdsuperargo.supersalud.gov.co/login")
         
         wait.until(EC.presence_of_element_located((By.ID, "user"))).send_keys(user)
         driver.find_element(By.ID, "password").send_keys(password)
         driver.execute_script("document.querySelectorAll('button').forEach(b => { if(b.innerText.includes('INGRESAR')) b.click(); });")
-        time.sleep(10)
+        time.sleep(12)
 
-        # --- EXCEL ---
+        # --- EXCEL (Corrección de Límites) ---
         file_path = "Reclamos.xlsx"
         df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
-        target_col = 110 # Columna DG
+        
+        # SOLUCIÓN AL INDEX ERROR: Creamos la columna DG explícitamente si falta
+        col_name = "Seguimiento_Extraido"
+        if len(df.columns) <= 110:
+            # Rellenamos con columnas vacías hasta llegar a la 111 (índice 110)
+            for i in range(len(df.columns), 111):
+                df[f"Col_Aux_{i}"] = ""
+        
+        # Usamos el nombre de la columna en lugar del índice numérico para evitar errores
+        df.columns.values[110] = col_name
 
-        # --- PRUEBA DE SELECTOR ESPECÍFICO ---
+        # --- EXTRACCIÓN ---
         for index, row in df.iterrows():
             pqr_nurc = str(row.iloc[5]).strip().split('.')[0]
             if not pqr_nurc or pqr_nurc == 'nan': break
                 
-            print(f"Probando selector en NURC: {pqr_nurc}")
+            print(f"Navegando a NURC: {pqr_nurc}")
             driver.get(f"https://pqrdsuperargo.supersalud.gov.co/gestion/supervisar/{pqr_nurc}")
             
             try:
-                # Selector proporcionado por el usuario (Información en app-status)
-                selector_test = "#contenido > div > div:nth-child(1) > div > mat-card:nth-child(1) > app-status > div > div:nth-child(3) > div:nth-child(8)"
+                # En lugar de un selector largo, esperamos a que el contenido principal cargue
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "mat-card")))
+                time.sleep(10)
                 
-                # Esperar a que el elemento esté presente
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector_test)))
-                time.sleep(5) # Pausa breve para renderizado
+                # Intentamos extraer TODO el texto de los seguimientos buscando la tabla por ID
+                # Esto es mucho más seguro que nth-child
+                script_js = """
+                let tabla = document.getElementById('main_table');
+                if (tabla) return tabla.innerText;
+                let follow = document.querySelector('app-follow');
+                if (follow) return follow.innerText;
+                return "No se visualiza contenido de seguimiento";
+                """
                 
-                # Extracción vía JavaScript para máxima compatibilidad
-                dato_prueba = driver.execute_script(f"return document.querySelector('{selector_test}').innerText;")
-                
-                if dato_prueba:
-                    df.iat[index, target_col] = dato_prueba.strip()
-                    print(f"-> EXITO DE PRUEBA: Dato encontrado: {dato_prueba.strip()}")
-                else:
-                    df.iat[index, target_col] = "Elemento encontrado pero sin texto"
-                    print("-> AVISO: Elemento sin texto.")
+                resultado = driver.execute_script(script_js)
+                df.at[index, col_name] = resultado.strip() if resultado else "Vacio"
+                print(f"-> EXITO: Datos capturados para {pqr_nurc}")
 
             except Exception as e:
-                print(f"-> ERROR: No se pudo localizar el selector de prueba.")
-                driver.save_screenshot(f"test_error_{pqr_nurc}.png")
-                df.iat[index, target_col] = "Selector de prueba no encontrado"
+                print(f"-> ERROR: No se detectó el contenido en el tiempo previsto.")
+                driver.save_screenshot(f"error_nurc_{pqr_nurc}.png")
+                df.at[index, col_name] = "Error de carga en la página"
             
             time.sleep(2)
 
         df.to_excel("Reclamos_scraping.xlsx", index=False)
-        print("Prueba finalizada.")
+        print("Proceso terminado exitosamente.")
 
     finally:
         driver.quit()
