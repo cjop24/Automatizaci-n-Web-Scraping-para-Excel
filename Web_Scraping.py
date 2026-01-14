@@ -7,34 +7,49 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# Configuración extrema para estabilidad en GitHub Actions
+# Configuración para GitHub Actions
 chrome_options = Options()
 chrome_options.add_argument("--headless=new")
 chrome_options.add_argument("--no-sandbox")
 chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--window-size=1920,1080")
-chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 def run_scraper():
-    # Uso de Secrets para seguridad como solicitaste
     user = os.getenv("PQRD_USER")
     password = os.getenv("PQRD_PASS")
     
     driver = webdriver.Chrome(options=chrome_options)
-    wait = WebDriverWait(driver, 50) # Aumentamos tiempo de espera
+    wait = WebDriverWait(driver, 60) # Aumentamos el tiempo de espera a 60s
 
     try:
-        # --- LOGIN ---
+        # --- PASO 1: Login ---
         print("Accediendo a la plataforma...")
         driver.get("https://pqrdsuperargo.supersalud.gov.co/login")
         
+        # Esperar a que los campos de texto existan
         wait.until(EC.presence_of_element_located((By.ID, "user"))).send_keys(user)
         driver.find_element(By.ID, "password").send_keys(password)
-        driver.execute_script("document.querySelector('button.mat-flat-button').click();")
-        time.sleep(15) # Tiempo de carga inicial
 
-        # --- EXCEL ---
+        print("Esperando botón de ingreso...")
+        # Esperamos a que el botón aparezca en el DOM antes de intentar el click por JS
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "button")))
+        
+        # Click robusto buscando el texto "INGRESAR"
+        driver.execute_script("""
+            let buttons = Array.from(document.querySelectorAll('button'));
+            let loginBtn = buttons.find(b => b.innerText.includes('INGRESAR') || b.className.includes('mat-flat-button'));
+            if (loginBtn) {
+                loginBtn.click();
+            } else {
+                throw new Error('Botón de ingreso no encontrado');
+            }
+        """)
+        
+        print("Login enviado, esperando carga del dashboard...")
+        time.sleep(15)
+
+        # --- PASO 2: Lectura de Excel ---
         file_path = "Reclamos.xlsx"
         df = pd.read_excel(file_path, engine='openpyxl', dtype=str)
         col_name = "Seguimiento_Extraido"
@@ -42,64 +57,52 @@ def run_scraper():
         # Asegurar columna DG (índice 110)
         if len(df.columns) <= 110:
             for i in range(len(df.columns), 111):
-                df[f"Col_{i}"] = ""
+                df[f"Col_Temp_{i}"] = ""
         df.columns.values[110] = col_name
 
-        # --- EXTRACCIÓN ---
+        # --- PASO 3: Extracción ---
         for index, row in df.iterrows():
             pqr_nurc = str(row.iloc[5]).strip().split('.')[0]
             if not pqr_nurc or pqr_nurc == 'nan': break
                 
-            url = f"https://pqrdsuperargo.supersalud.gov.co/gestion/supervisar/{pqr_nurc}"
-            print(f"Abriendo: {pqr_nurc}")
-            driver.get(url)
+            print(f"Abriendo NURC: {pqr_nurc}")
+            driver.get(f"https://pqrdsuperargo.supersalud.gov.co/gestion/supervisar/{pqr_nurc}")
             
             try:
-                # 1. Espera forzada al componente principal que vimos en tu foto
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, "app-follow")))
-                
-                # 2. Scroll para asegurar que Angular 'despierte' el componente
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-                time.sleep(15) # Espera larga para que la base de datos responda
+                # Esperar al contenedor que vimos en tu foto
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "app-list-seguimientos")))
+                time.sleep(12) # Pausa para que Angular pinte los datos
 
-                # 3. SCRIPT JS DE EXTRACCIÓN TOTAL (Busca la tabla o cualquier texto en app-follow)
-                js_extract = """
-                let container = document.querySelector('app-list-seguimientos');
-                if (!container) container = document.querySelector('app-follow');
-                
-                if (container) {
-                    let rows = container.querySelectorAll('tr');
-                    let data = [];
-                    rows.forEach(r => {
-                        if (r.innerText.trim().length > 10 && !r.innerText.includes('Fecha')) {
-                            data.push(r.innerText.replace(/\\t/g, ' | ').trim());
-                        }
-                    });
-                    return data.length > 0 ? data.join('\\n---\\n') : container.innerText;
-                }
-                return "CONTENEDOR_NO_HALLADO";
+                # Extracción forzada de la tabla
+                script_ext = """
+                let rows = document.querySelectorAll('app-list-seguimientos table tbody tr');
+                let result = [];
+                rows.forEach(r => {
+                    if (r.innerText.trim() && !r.innerText.includes('No hay datos')) {
+                        result.push(r.innerText.replace(/\\t/g, ' | ').trim());
+                    }
+                });
+                return result.join('\\n---\\n');
                 """
                 
-                texto = driver.execute_script(js_extract)
-                df.at[index, col_name] = texto
-                print(f"-> EXITO: {pqr_nurc}")
+                texto = driver.execute_script(script_ext)
+                df.at[index, col_name] = texto if texto else "Tabla encontrada pero vacía"
+                print(f"-> Datos extraídos para {pqr_nurc}")
 
-            except Exception:
-                # Si falla, tomamos TODO lo que haya en la pantalla como último recurso
-                print(f"-> FALLO SELECTOR: Intentando captura de emergencia en {pqr_nurc}")
-                try:
-                    emergencia = driver.execute_script("return document.body.innerText;")
-                    df.at[index, col_name] = "CAPTURA_EMERGENCIA: " + emergencia[:500]
-                except:
-                    df.at[index, col_name] = "ERROR_TOTAL_DE_CARGA"
-                
+            except Exception as e:
+                print(f"-> No se pudo extraer datos para {pqr_nurc}")
+                df.at[index, col_name] = "Sin seguimiento visible"
                 driver.save_screenshot(f"error_{pqr_nurc}.png")
             
-            time.sleep(3)
+            time.sleep(2)
 
         df.to_excel("Reclamos_scraping.xlsx", index=False)
-        print("Fin del proceso.")
+        print("Proceso finalizado.")
 
+    except Exception as e:
+        print(f"Error fatal: {e}")
+        driver.save_screenshot("debug_error.png")
+        raise
     finally:
         driver.quit()
 
