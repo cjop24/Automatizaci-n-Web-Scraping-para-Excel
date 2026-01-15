@@ -36,9 +36,8 @@ def run_scraper():
         wait.until(EC.url_contains("/inicio"))
         logging.info("✅ Login exitoso.")
 
-        # --- CARGA CRÍTICA: Forzamos STRING para evitar redondeos ---
+        # --- CARGA: Forzamos STRING para evitar redondeos en F, J, L, M, W, Y, Z, BH, CN ---
         file_input = "Reclamos.xlsx"
-        # Leemos TODO como string para que las columnas F, J, L, M, W, Y, Z, BH, CN no se alteren
         df = pd.read_excel(file_input, engine='openpyxl', dtype=str) 
         
         col_name = "Seguimiento_Extraido"
@@ -49,19 +48,23 @@ def run_scraper():
                 df[f"Col_Extra_{len(df.columns)}"] = ""
         df.columns.values[110] = col_name
 
-        # Limpiar la columna de seguimiento para identificar pendientes
-        df[col_name] = df[col_name].fillna("").strip() if hasattr(df[col_name], 'str') else df[col_name].fillna("")
+        # Limpiar columna de seguimiento para identificar vacíos de forma segura
+        df[col_name] = df[col_name].fillna("").astype(str).str.strip()
+        
+        # Filtrar solo los que realmente están vacíos
         indices_pendientes = df.index[df[col_name] == ""].tolist()
         
         total_a_procesar = min(len(indices_pendientes), LIMITE_BATCH)
-        logging.info(f"Registros pendientes: {len(indices_pendientes)}")
+        logging.info(f"Registros pendientes encontrados: {len(indices_pendientes)}")
         
         contador = 0
         for idx in indices_pendientes:
             if contador >= LIMITE_BATCH: break
             
-            # Obtener NURC (Columna F -> Índice 5) de forma segura
-            pqr_nurc = str(df.iloc[idx, 5]).strip().split('.')[0]
+            # Obtener NURC (Columna F -> Índice 5)
+            pqr_nurc = str(df.iloc[idx, 5]).strip()
+            # Limpieza adicional por si viene con .0 del archivo original
+            if pqr_nurc.endswith('.0'): pqr_nurc = pqr_nurc[:-2]
             
             if not pqr_nurc or pqr_nurc == 'nan' or pqr_nurc == "":
                 continue
@@ -71,8 +74,8 @@ def run_scraper():
             
             resultado = "Sin registros"
             try:
-                # Espera de renderizado
-                time.sleep(6) 
+                # Espera de renderizado para Angular
+                time.sleep(7) 
                 script_js = """
                 let table = document.querySelector('app-list-seguimientos table');
                 if (!table) return null;
@@ -89,20 +92,23 @@ def run_scraper():
                 res = driver.execute_script(script_js)
                 if res: resultado = res
             except:
-                resultado = "Error en extracción"
+                resultado = "Error en extracción técnica"
 
             df.at[idx, col_name] = resultado
             contador += 1
             
-            # Guardado preventivo
+            # Guardado preventivo cada 25 registros
             if contador % 25 == 0:
                 df.to_excel("Reclamos.xlsx", index=False)
 
-        # Guardado final preservando el formato texto
+        # Guardado final
         df.to_excel("Reclamos.xlsx", index=False)
         df.to_excel("Reclamos_scraping.xlsx", index=False)
-        logging.info(f"✅ Proceso terminado. Total: {contador}")
+        logging.info(f"✅ Proceso terminado. Total procesados en este lote: {contador}")
 
+    except Exception as e:
+        logging.error(f"Error crítico en el proceso: {e}")
+        driver.save_screenshot("ERROR_CRITICO.png")
     finally:
         driver.quit()
 
