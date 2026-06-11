@@ -105,10 +105,25 @@ def run_scraper():
         df.to_excel("Reclamos.xlsx", index=False)
         df.to_excel("Reclamos_scraping.xlsx", index=False)
         logging.info(f"✅ Proceso terminado. Total procesados en este lote: {contador}")
-
+	
     except Exception as e:
-        logging.error(f"Error crítico en el proceso: {e}")
-        driver.save_screenshot("ERROR_CRITICO.png")
+    
+    except Exception as e:
+    	logging.error(f"Error crítico en el proceso: {e}")
+
+    	try:
+    		driver.save_screenshot("ERROR_CRITICO.png")
+        	logging.info("✅ Screenshot guardado como ERROR_CRITICO.png")
+    	except Exception as img_error:
+        	logging.error(f"No se pudo guardar screenshot: {img_error}")
+
+    	# Guardar HTML (MUY IMPORTANTE)
+    	try:
+        	with open("ERROR_CRITICO.html", "w", encoding="utf-8") as f:
+            		f.write(driver.page_source)
+        	logging.info("✅ HTML guardado como ERROR_CRITICO.html")
+    	except Exception as html_error:
+        	logging.error(f"No se pudo guardar HTML: {html_error}")
     finally:
         driver.quit()
 
